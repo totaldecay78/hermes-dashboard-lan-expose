@@ -1,242 +1,124 @@
-# Hermes Dashboard — LAN Exposure Package
+# Hermes Dashboard — LAN Exposure
 
-A self-contained deployable package that exposes the **Hermes Agent dashboard**
-(bound to `127.0.0.1:9119`) to other devices on the local network **without**
-using `--insecure` or modifying the dashboard's bind address.
+> **Expose the Hermes Agent dashboard** (bound to `127.0.0.1:9119`) to other
+> devices on the local network **without** using `--insecure` or modifying the
+> dashboard's bind address.
 
-> **Purpose**: Let another Hermes agent (or human) reproduce the exact setup
-> that was built on the source machine. All config files use **template
-> variables** so they work on any Fedora/RHEL-like system.
-
----
-
-## Architecture
+## 📦 Repository Structure
 
 ```
-LAN client → 192.168.1.x:LAN_PORT
-  → firewalld (port LAN_PORT/tcp open)
-  → iptables DNAT (LAN_PORT → INTERNAL_PORT, requires route_localnet=1)
-  → nginx (0.0.0.0:INTERNAL_PORT, rewrites Host → 127.0.0.1)
-  → Hermes dashboard (127.0.0.1:DASHBOARD_PORT)
+/
+├── linux/             ← Fedora/RHEL (dnf, nginx, iptables, firewalld)
+│   ├── deploy.sh      ← One-shot infrastructure deploy (run as root)
+│   ├── verify.sh      ← Post-deploy verification
+│   ├── rollback.sh    ← Clean removal
+│   ├── deploy-dashboard-user-service.sh  ← systemd user service auto-start
+│   ├── config/        ← Templated nginx, sysctl, systemd service files
+│   ├── patches/       ← Git patch for Hermes web_server.py
+│   └── README.md      ← Linux-specific instructions
+│
+├── windows/           ← Windows 8.1+ (PowerShell 5.1, netsh, schtasks)
+│   ├── deploy.ps1     ← One-shot infrastructure deploy (run as Admin)
+│   ├── verify.ps1     ← Post-deploy verification
+│   ├── rollback.ps1   ← Clean removal
+│   ├── deploy-dashboard-startup.ps1  ← Scheduled Task auto-start
+│   ├── patches/       ← Same git patch (cross-platform Python source)
+│   └── README.md      ← Windows-specific instructions
+│
+└── patches/           ← (symlinked/identical cross-platform patch)
 ```
 
-**Why nginx?** Hermes validates the HTTP `Host` header against its bound
-interface (`127.0.0.1`). Without rewriting it, requests from LAN browsers
-are rejected with `"Invalid Host header"`. Nginx strips the LAN IP from the
-Host header and substitutes `127.0.0.1`.
+## 🎯 For Hermes Agents: Auto-Detection
 
----
+When a Hermes agent receives the URL of this repo, here is the recommended
+workflow:
 
-## What's In This Package
-
-```
-hermes-dashboard-lan-package/
-├── README.md                                  ← this file
-├── deploy.sh                                  ← one-shot deploy (run as root)
-├── deploy-dashboard-user-service.sh           ← dashboard auto-start (run as user)
-├── verify.sh                                  ← post-deploy verification
-├── rollback.sh                                ← remove everything cleanly
-├── config/
-│   ├── nginx-hermes-dashboard.conf            ← nginx reverse proxy (template)
-│   ├── sysctl-hermes-route-localnet.conf      ← route_localnet=1
-│   ├── hermes-dashboard-proxy.service         ← systemd system service (iptables DNAT)
-│   └── hermes-dashboard.service               ← systemd user service (dashboard auto-start)
-└── patches/
-    └── allow-lan-origins.patch                ← git patch for web_server.py
-```
-
----
-
-## What The Agent Created (for reference)
-
-### System config files written
-
-| File | Purpose |
-|---|---|
-| `/etc/nginx/conf.d/hermes-dashboard.conf` | Nginx reverse proxy: `0.0.0.0:9191 → 127.0.0.1:9119` |
-| `/etc/sysctl.d/99-hermes-route-localnet.conf` | `net.ipv4.conf.all.route_localnet=1` |
-| `/etc/systemd/system/hermes-dashboard-proxy.service` | Oneshot service: iptables DNAT rules + sysctl, persists across reboots |
-| `~/.config/systemd/user/hermes-dashboard.service` | User service: auto-starts `hermes dashboard --no-open` at boot |
-
-### iptables rules added
+### Linux agent
 
 ```bash
-# External traffic: DNAT LAN:9119 → 127.0.0.1:9191
-iptables -t nat -A PREROUTING -p tcp --dport 9119 -j DNAT --to-destination 127.0.0.1:9191
+git clone https://github.com/totaldecay78/hermes-dashboard-lan-expose.git
+cd hermes-dashboard-lan-expose/linux
 
-# Local traffic to own external IP: same DNAT (skip loopback)
-iptables -t nat -A OUTPUT -p tcp --dport 9119 ! -d 127.0.0.0/8 -j DNAT --to-destination 127.0.0.1:9191
-```
-
-### SELinux changes
-
-```bash
-semanage port -a -t http_port_t -p tcp 9191
-setsebool -P httpd_can_network_connect 1
-```
-
-### Firewall
-
-```bash
-firewall-cmd --add-port=9119/tcp --permanent
-```
-
-### Hermes web_server.py patches
-
-Two surgical changes in `hermes_cli/web_server.py`:
-
-1. **CORS regex** (line ~238): Added RFC1918 private IP ranges so the CORS
-   middleware accepts `Origin` headers from LAN addresses.
-
-2. **`_is_accepted_host`** (line ~389): When the dashboard is bound to loopback,
-   also accept private LAN IPs as valid `Host`/`Origin` values (since the
-   request arrives through nginx on the same machine).
-
-These are the *only* Hermes source changes needed. Everything else is pure
-system administration.
-
-### systemd boot order
-
-```
-Fedora boot
-├─ systemd (user)  ─── hermes-gateway.service
-│                    └─ Gateway messaging platforms
-├─ systemd (user)  ─── hermes-dashboard.service       ← user service
-│                    └─ hermes dashboard --no-open
-│                    └─ Port 127.0.0.1:9119
-├─ systemd (system) ─ nginx.service
-│                    └─ Proxy 0.0.0.0:9191 → 127.0.0.1:9119
-└─ systemd (system) ─ hermes-dashboard-proxy.service
-                     └─ iptables DNAT 9119 → 9191
-                     └─ sysctl route_localnet=1
-```
-
----
-
-## Quick Start (for Another Agent)
-
-### Prerequisites
-
-- Fedora / RHEL / CentOS (or any `dnf`-based distro)
-- Hermes Agent installed with dashboard at `~/.hermes`
-- `sudo` access
-- Static LAN IP recommended (so browser bookmarks survive DHCP changes)
-
-### Step 1 — Deploy the infrastructure
-
-```bash
-# As root — installs nginx, firewall, iptables, SELinux, sysctl
+# If `uname -s` contains "Linux" — use the bash scripts:
 sudo ./deploy.sh
 
-# Custom ports (if Hermes dashboard listens on a different port):
-sudo ./deploy.sh --port 9119 --internal-port 9191
-```
-
-This handles everything *except* the web_server.py patch and the dashboard
-auto-start service.
-
-### Step 2 — Patch Hermes web_server.py
-
-The deploy script will prompt you. Or do it manually:
-
-```bash
+# Apply the web_server.py patch:
 cd ~/.hermes/hermes-agent
-git apply /path/to/patches/allow-lan-origins.patch
-```
+git apply /path/to/repo/linux/patches/allow-lan-origins.patch
 
-If the patch fails (already applied), confirm with:
-```bash
-grep '192\.168' hermes_cli/web_server.py
-```
-
-### Step 3 — Restart the dashboard
-
-```bash
-hermes dashboard --stop
-hermes dashboard --no-open &
-
-# Or if using the user service:
-systemctl --user restart hermes-dashboard.service
-```
-
-### Step 4 — (Optional) Dashboard auto-start at boot
-
-```bash
-./deploy-dashboard-user-service.sh
-```
-
-This installs a systemd **user** service so the dashboard starts
-automatically when the machine boots, without requiring a desktop login.
-
-### Step 5 — Verify
-
-```bash
+# Verify:
 ./verify.sh
 ```
 
-Also test from a LAN device:
-```bash
-curl -s http://192.168.1.YOUR_IP:9119/api/status
+### Windows agent
+
+```powershell
+git clone https://github.com/totaldecay78/hermes-dashboard-lan-expose.git
+cd hermes-dashboard-lan-expose/windows
+
+# If Microsoft Windows — use the PowerShell scripts:
+# (Run as Administrator)
+.\deploy.ps1
+
+# Apply the web_server.py patch:
+cd $env:USERPROFILE\.hermes\hermes-agent
+git apply (Join-Path $PSScriptRoot "patches\allow-lan-origins.patch")
+
+# Verify:
+.\verify.ps1
 ```
 
-Should return JSON with version info — not an error.
+### Agent decision tree
 
----
+```
+1. Clone the repo
+2. Check [System.Environment]::OSVersion.Platform (Windows)
+   OR run `uname -s` (Linux)
+3. If Linux → cd linux/ → run deploy.sh
+4. If Windows → cd windows/ → run deploy.ps1 (as Admin)
+5. Apply patches/allow-lan-origins.patch to Hermes source
+6. Restart Hermes dashboard
+7. Run verify.sh or verify.ps1
+```
 
-## Port Configuration Reference
+## 🧩 What Problem Does This Solve?
 
-| Variable | Default | Description |
+The Hermes dashboard listens on `127.0.0.1:9119` by design — only local
+processes can reach it. Opening it to 0.0.0.0 via `--insecure` would let
+any website read/modify config and secrets.
+
+This package adds a **controlled LAN exposure layer**:
+
+| Layer | Linux | Windows |
 |---|---|---|
-| `LAN_PORT` | `9119` | Port exposed to LAN clients (used by iptables + firewall) |
-| `INTERNAL_PORT` | `9191` | Port nginx listens on internally (never reaches Hermes directly) |
-| `DASHBOARD_PORT` | same as `LAN_PORT` | Port Hermes dashboard binds to on `127.0.0.1` |
+| Port forwarding | iptables DNAT + nginx | `netsh interface portproxy` |
+| Host header adaptation | nginx rewrites → `127.0.0.1` | Patch accepts LAN IPs directly |
+| Firewall | firewalld | `netsh advfirewall` |
+| Auto-start | systemd user service | Scheduled Task |
+| Extra tools | nginx | None (built-in) |
 
-### Port mapping explained
+The Hermes `web_server.py` patch (`patches/allow-lan-origins.patch`) is the
+same file for both platforms — Python source is cross-platform.
 
-```
-Client → LAN_PORT (9119) → iptables DNAT → INTERNAL_PORT (9191) → nginx → 127.0.0.1:DASHBOARD_PORT (9119)
-```
+## 🔧 Quick Reference
 
----
-
-## Rollback
-
-```bash
-sudo ./rollback.sh [--port LAN_PORT]
-```
-
-To also revert the Hermes source patches:
-```bash
-cd ~/.hermes/hermes-agent
-git checkout -- hermes_cli/web_server.py
-systemctl --user restart hermes-dashboard.service
-```
-
----
-
-## Pitfalls (for the Agent to Watch Out For)
-
-| Pitfall | Symptom | Solution |
+| Task | Linux | Windows |
 |---|---|---|
-| **SELinux blocks nginx** | 502 Bad Gateway from LAN | `semanage port -a -t http_port_t -p tcp 9191` + `setsebool httpd_can_network_connect 1` |
-| **route_localnet=0** | iptables DNAT drops packets silently | `sysctl -w net.ipv4.conf.all.route_localnet=1` (persist in `/etc/sysctl.d/`) |
-| **iptables OUTPUT without `! -d 127.0.0.0/8`** | Local processes to 127.0.0.1:9119 get caught by DNAT → loop | Add `! -d 127.0.0.0/8` to the OUTPUT rule |
-| **SSE buffering** | Dashboard events feed doesn't update in real-time | Add `proxy_buffering off; proxy_cache off;` to nginx config |
-| **Double Origin check** | CORS passes but `_is_accepted_host` rejects | Both CORS regex AND `_is_accepted_host` must be patched |
-| **Dashboard doesn't restart after patch** | Old code still running | Kill old `hermes dashboard` process — `systemctl --user restart hermes-dashboard.service` |
-| **Nginx can't bind 0.0.0.0:DASHBOARD_PORT** | Port already in use | Use a different INTERNAL_PORT (9191) + DNAT |
-| **Dashboard auto-starts browser** | Browser opens on every boot | Always use `--no-open` flag in headless/server environments |
+| Deploy everything | `sudo ./linux/deploy.sh` | `.\windows\deploy.ps1` (Admin) |
+| Verify | `./linux/verify.sh` | `.\windows\verify.ps1` (Admin) |
+| Rollback | `sudo ./linux/rollback.sh` | `.\windows\rollback.ps1` (Admin) |
+| Dashboard auto-start | `./linux/deploy-dashboard-user-service.sh` | `.\windows\deploy-dashboard-startup.ps1` (Admin) |
+| Patch web_server.py | `cd ~/.hermes/hermes-agent && git apply linux/patches/allow-lan-origins.patch` | `cd $env:USERPROFILE\.hermes\hermes-agent && git apply windows\patches\allow-lan-origins.patch` |
 
----
+## 🔐 Security Notes
 
-## Hermes Skill
-
-The workflow is also saved as a skill under `hermes-dashboard-lan-expose`
-in the source agent's skills directory. Load it with:
-
-```python
-skill_view(name='hermes-dashboard-lan-expose')
-```
-
-The skill's SKILL.md contains the full procedure with exact commands and
-rollback steps.
+- **No --insecure**: The dashboard stays on 127.0.0.1. Only the specific
+  operations described above allow LAN access.
+- **RFC1918 only**: The CORS and Host validation patches only accept private
+  IP ranges (10.x.x.x, 172.16-31.x.x, 192.168.x.x). Public/WAN requests are
+  still rejected.
+- **Local proxy**: On Linux, nginx runs on the same machine and rewrites the
+  Host header — LAN browsers never talk directly to the dashboard process.
+- **Windows native**: On Windows, netsh portproxy is a kernel-level TCP tunnel
+  — no userspace proxy process.
+- **Rollback scripts**: Every deploy action has a corresponding rollback.
