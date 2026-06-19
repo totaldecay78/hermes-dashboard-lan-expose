@@ -1,0 +1,38 @@
+# SPDX-License-Identifier: MIT
+#
+# Hermes Dashboard Proxy — systemd service for iptables DNAT + sysctl setup
+# ==========================================================================
+# A oneshot service that:
+#   1. Ensures net.ipv4.conf.all.route_localnet=1
+#   2. Adds iptables DNAT rules forwarding port LAN_PORT → INTERNAL_IP:INTERNAL_PORT
+#
+# Template variables (replace before deploying):
+#   LAN_PORT       — port exposed to LAN clients (default: 9119)
+#   INTERNAL_IP    — nginx proxy IP (default: 127.0.0.1)
+#   INTERNAL_PORT  — nginx proxy port (default: 9191)
+#
+# Install:
+#   sudo cp hermes-dashboard-proxy.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now hermes-dashboard-proxy.service
+
+[Unit]
+Description=Hermes Dashboard Proxy (nginx + DNAT LAN_PORT)
+After=network.target nginx.service
+Requires=nginx.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c '\
+  sysctl -w net.ipv4.conf.all.route_localnet=1 && \
+  iptables -t nat -A PREROUTING -p tcp --dport LAN_PORT -j DNAT --to-destination INTERNAL_IP:INTERNAL_PORT && \
+  iptables -t nat -A OUTPUT -p tcp --dport LAN_PORT ! -d 127.0.0.0/8 -j DNAT --to-destination INTERNAL_IP:INTERNAL_PORT \
+'
+ExecStop=/bin/sh -c '\
+  iptables -t nat -D PREROUTING -p tcp --dport LAN_PORT -j DNAT --to-destination INTERNAL_IP:INTERNAL_PORT 2>/dev/null; \
+  iptables -t nat -D OUTPUT -p tcp --dport LAN_PORT ! -d 127.0.0.0/8 -j DNAT --to-destination INTERNAL_IP:INTERNAL_PORT 2>/dev/null \
+'
+
+[Install]
+WantedBy=multi-user.target

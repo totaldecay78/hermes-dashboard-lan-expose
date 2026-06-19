@@ -1,0 +1,47 @@
+From: Hermes Agent <hermes@nousresearch.com>
+Date: 2026-06-19
+Subject: fix: allow LAN IPs in dashboard CORS and Origin validation
+
+Patches web_server.py to accept RFC1918 private IP ranges (10.x.x.x,
+172.16-31.x.x, 192.168.x.x) in Origin/Host validation when the dashboard
+is bound to loopback. This lets LAN browsers connect through an nginx
+reverse proxy without requiring --insecure.
+
+Applies to: hermes_cli/web_server.py
+
+diff --git a/hermes_cli/web_server.py b/hermes_cli/web_server.py
+index 6701d6739..29267aea4 100644
+--- a/hermes_cli/web_server.py
++++ b/hermes_cli/web_server.py
+@@ -235,7 +235,7 @@ _REVEAL_WINDOW_SECONDS = 30
+ 
+ app.add_middleware(
+     CORSMiddleware,
+-    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
++    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+|192\.168\.\d+\.\d+)(:\d+)?$",
+     allow_methods=["*"],
+     allow_headers=["*"],
+ )
+@@ -383,10 +383,20 @@ def _is_accepted_host(host_header: str, bound_host: str) -> bool:
+     if bound_host in {"0.0.0.0", "::"}:
+         return True
+ 
+-    # Loopback bind: accept the loopback names
++    # Loopback bind: accept the loopback names + private LAN IPs
++    # (the operator explicitly set up nginx + firewalld for LAN access)
+     bound_lc = bound_host.lower()
+     if bound_lc in _LOOPBACK_HOST_VALUES:
+-        return host_only in _LOOPBACK_HOST_VALUES
++        if host_only in _LOOPBACK_HOST_VALUES:
++            return True
++        # Accept RFC1918 private IPs (10.x.x.x, 172.16-31.x.x, 192.168.x.x)
++        # when bound to loopback — the request arrives through a local
++        # reverse proxy (nginx) and the Origin/Host header carries the
++        # LAN address the browser used.
++        import re
++        if re.match(r"^(10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+|192\.168\.\d+\.\d+)$", host_only):
++            return True
++        return False
+ 
+     # Explicit non-loopback bind: require exact host match
+     return host_only == bound_lc

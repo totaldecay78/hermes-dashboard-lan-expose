@@ -1,0 +1,44 @@
+# SPDX-License-Identifier: MIT
+#
+# Hermes Dashboard — systemd user service (auto-start at boot)
+# =============================================================
+# Runs the Hermes Agent dashboard as a user service so it survives reboots
+# without requiring a desktop login.
+#
+# Template variables (replace before deploying):
+#   HERMES_HOME   — path to the Hermes config directory (default: ~/.hermes)
+#   VENV_PATH     — path to the hermes-agent virtualenv
+#   USERNAME      — the Linux username
+#
+# Prerequisite: loginctl enable-linger $USER
+#   (lets user services survive boot without login)
+#
+# Install:
+#   mkdir -p ~/.config/systemd/user
+#   cp hermes-dashboard.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now hermes-dashboard.service
+
+[Unit]
+Description=Hermes Agent Dashboard - Web UI
+After=network-online.target hermes-gateway.service
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=VENV_PATH/bin/python VENV_PATH/bin/hermes dashboard --no-open
+WorkingDirectory=HERMES_HOME
+Environment="PATH=VENV_PATH/bin:VENV_PATH/node_modules/.bin:HERMES_HOME/node/bin:/home/USERNAME/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="VIRTUAL_ENV=VENV_PATH"
+Environment="HERMES_HOME=HERMES_HOME"
+Restart=always
+RestartSec=5
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
